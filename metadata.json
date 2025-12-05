@@ -1,0 +1,5 @@
+{
+  "name": "WebP to JPEG Converter",
+  "description": "A fast, privacy-focused client-side tool to convert WebP images to JPEG in bulk and download them as a ZIP archive.",
+  "requestFramePermissions": []
+}
