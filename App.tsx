@@ -1,14 +1,22 @@
 import React, { useState, useCallback, useMemo } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { FileItem, ConversionStatus, ProcessingStats } from './types';
+import { FileItem, ConversionStatus, ProcessingStats, AppMode, PdfOptions } from './types';
 import { convertWebPToJpeg, zipAndDownload } from './services/imageService';
+import { generatePdf } from './services/pdfService';
 import DropZone from './components/DropZone';
 import FileCard from './components/FileCard';
-import { Download, RefreshCw, Trash2, Image as ImageIcon, Zap } from 'lucide-react';
+import { Download, RefreshCw, Trash2, Image as ImageIcon, Zap, FileText, Settings2 } from 'lucide-react';
 
 const App: React.FC = () => {
+  const [mode, setMode] = useState<AppMode>(AppMode.JPEG);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [pdfBlob, setPdfBlob] = useState<Blob | null>(null);
+  
+  const [pdfOptions, setPdfOptions] = useState<PdfOptions>({
+    margin: 'small',
+    orientation: 'portrait',
+  });
 
   // Stats calculation
   const stats: ProcessingStats = useMemo(() => {
@@ -27,6 +35,7 @@ const App: React.FC = () => {
       status: ConversionStatus.IDLE,
     }));
     setFiles(prev => [...prev, ...newItems]);
+    setPdfBlob(null); // Reset PDF if new files added
   }, []);
 
   const handleRemoveFile = useCallback((id: string) => {
@@ -37,37 +46,26 @@ const App: React.FC = () => {
       }
       return prev.filter(f => f.id !== id);
     });
+    setPdfBlob(null);
   }, []);
 
   const handleClearAll = useCallback(() => {
     if (window.confirm("Are you sure you want to clear all files?")) {
       files.forEach(f => URL.revokeObjectURL(f.previewUrl));
       setFiles([]);
+      setPdfBlob(null);
     }
   }, [files]);
 
-  const startConversion = useCallback(async () => {
-    const pendingFiles = files.filter(f => f.status === ConversionStatus.IDLE || f.status === ConversionStatus.ERROR);
-    
-    if (pendingFiles.length === 0) return;
+  // Helper to update status
+  const updateStatus = (id: string, status: ConversionStatus, extra: Partial<FileItem> = {}) => {
+    setFiles(prev => prev.map(f => f.id === id ? { ...f, status, ...extra } : f));
+  };
 
-    setIsProcessing(true);
-
-    // Process sequentially to avoid freezing UI on massive lists, or parallel with limits. 
-    // For simplicity and safety in browser, let's do batches of 3.
+  const startJpegConversion = async (pendingFiles: FileItem[]) => {
     const BATCH_SIZE = 3;
-    
-    // Helper to update status
-    const updateStatus = (id: string, status: ConversionStatus, extra: Partial<FileItem> = {}) => {
-      setFiles(prev => prev.map(f => f.id === id ? { ...f, status, ...extra } : f));
-    };
-
-    // Mark all pending as converting visually first (optional, but good UX if quick)
-    // Actually better to mark them as they process.
-
     for (let i = 0; i < pendingFiles.length; i += BATCH_SIZE) {
       const batch = pendingFiles.slice(i, i + BATCH_SIZE);
-      
       await Promise.all(batch.map(async (item) => {
         updateStatus(item.id, ConversionStatus.CONVERTING);
         try {
@@ -78,36 +76,113 @@ const App: React.FC = () => {
         }
       }));
     }
+  };
+
+  const startPdfConversion = async () => {
+    // For PDF, we re-process all files to ensure order and settings
+    // Visually reset them to processing
+    setFiles(prev => prev.map(f => ({ ...f, status: ConversionStatus.CONVERTING })));
+    
+    try {
+      // Use existing files array in order
+      const fileObjects = files.map(f => f.file);
+      
+      const blob = await generatePdf(fileObjects, pdfOptions, (index) => {
+         // Mark items as completed as we progress (for visual feedback)
+         // Note: We are iterating through the *current* files state which might change if user interacts,
+         // but since isProcessing blocks actions, safe enough.
+         const itemId = files[index].id;
+         updateStatus(itemId, ConversionStatus.COMPLETED);
+      });
+      
+      setPdfBlob(blob);
+    } catch (e) {
+      console.error(e);
+      setFiles(prev => prev.map(f => ({ ...f, status: ConversionStatus.ERROR, error: 'PDF Generation failed' })));
+    }
+  };
+
+  const startConversion = useCallback(async () => {
+    if (files.length === 0) return;
+    setIsProcessing(true);
+
+    if (mode === AppMode.JPEG) {
+      const pendingFiles = files.filter(f => f.status === ConversionStatus.IDLE || f.status === ConversionStatus.ERROR);
+      if (pendingFiles.length > 0) {
+        await startJpegConversion(pendingFiles);
+      }
+    } else {
+      await startPdfConversion();
+    }
 
     setIsProcessing(false);
-  }, [files]);
+  }, [files, mode, pdfOptions]);
 
-  const handleDownloadZip = useCallback(async () => {
-    const completedFiles = files.filter(f => f.status === ConversionStatus.COMPLETED && f.convertedBlob);
-    if (completedFiles.length === 0) return;
+  const handleDownload = useCallback(async () => {
+    if (mode === AppMode.JPEG) {
+      const completedFiles = files.filter(f => f.status === ConversionStatus.COMPLETED && f.convertedBlob);
+      if (completedFiles.length === 0) return;
 
-    await zipAndDownload(completedFiles.map(f => ({
-      name: f.file.name,
-      blob: f.convertedBlob!
-    })));
-  }, [files]);
+      await zipAndDownload(completedFiles.map(f => ({
+        name: f.file.name,
+        blob: f.convertedBlob!
+      })));
+    } else {
+      if (!pdfBlob) return;
+      const url = URL.createObjectURL(pdfBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `converted_images_${new Date().getTime()}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+  }, [files, mode, pdfBlob]);
+
+  // Determine which files to accept based on mode
+  const acceptType = mode === AppMode.PDF ? "image/*" : "image/webp";
 
   return (
     <div className="min-h-screen flex flex-col items-center p-4 sm:p-8">
       
       {/* Header */}
-      <header className="w-full max-w-5xl mb-12 text-center mt-8">
+      <header className="w-full max-w-5xl mb-8 text-center mt-8">
         <div className="inline-flex items-center justify-center p-3 bg-brand-900/30 rounded-full mb-6 border border-brand-500/20">
           <Zap className="w-6 h-6 text-brand-500 mr-2" />
           <span className="text-brand-100 font-medium">Lightning Fast Local Conversion</span>
         </div>
         <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight mb-4 text-white">
-          WebP to <span className="text-transparent bg-clip-text bg-gradient-to-r from-brand-500 to-indigo-500">JPEG</span>
+          WebP to <span className="text-transparent bg-clip-text bg-gradient-to-r from-brand-500 to-indigo-500">{mode === AppMode.JPEG ? 'JPEG' : 'PDF'}</span>
         </h1>
-        <p className="text-slate-400 text-lg max-w-2xl mx-auto">
+        <p className="text-slate-400 text-lg max-w-2xl mx-auto mb-8">
           Drag, drop, and convert infinite files instantly in your browser. <br className="hidden sm:block"/>
           No servers, no upload limits, 100% private.
         </p>
+
+        {/* Global Mode Switcher - Visible Always */}
+        <div className="inline-flex bg-slate-800 p-1 rounded-lg border border-slate-700 shadow-lg">
+            <button 
+            onClick={() => { setMode(AppMode.JPEG); setPdfBlob(null); }}
+            disabled={isProcessing}
+            className={`flex items-center justify-center px-6 py-2.5 text-sm font-bold rounded-md transition-all
+                ${mode === AppMode.JPEG ? 'bg-brand-600 text-white shadow-md' : 'text-slate-400 hover:text-white hover:bg-slate-700'}
+            `}
+            >
+            <ImageIcon className="w-4 h-4 mr-2" />
+            JPEG Mode
+            </button>
+            <button 
+            onClick={() => { setMode(AppMode.PDF); setFiles(prev => prev.map(f => ({...f, status: ConversionStatus.IDLE}))); }}
+            disabled={isProcessing}
+            className={`flex items-center justify-center px-6 py-2.5 text-sm font-bold rounded-md transition-all
+                ${mode === AppMode.PDF ? 'bg-brand-600 text-white shadow-md' : 'text-slate-400 hover:text-white hover:bg-slate-700'}
+            `}
+            >
+            <FileText className="w-4 h-4 mr-2" />
+            PDF Mode
+            </button>
+        </div>
       </header>
 
       {/* Main Content */}
@@ -116,7 +191,11 @@ const App: React.FC = () => {
         {/* State: Empty */}
         {files.length === 0 && (
           <div className="w-full max-w-2xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-700">
-            <DropZone onFilesAdded={handleFilesAdded} />
+            <DropZone 
+              onFilesAdded={handleFilesAdded} 
+              title={mode === AppMode.PDF ? "Drop Images to create PDF" : "Drop WebP files to convert"}
+              accept={acceptType}
+            />
           </div>
         )}
 
@@ -155,28 +234,81 @@ const App: React.FC = () => {
               </div>
               
               {/* Mini Dropzone */}
-              <DropZone onFilesAdded={handleFilesAdded} compact />
+              <DropZone onFilesAdded={handleFilesAdded} compact accept={acceptType} />
             </div>
 
             {/* Right Column: Actions & Summary */}
             <div className="lg:col-span-1">
               <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 sticky top-8 shadow-xl">
+                
                 <h3 className="text-lg font-bold text-white mb-6">Action Station</h3>
                 
+                {/* PDF Options */}
+                {mode === AppMode.PDF && (
+                  <div className="mb-8 space-y-4 animate-in slide-in-from-top-2 duration-300">
+                    <div className="flex items-center text-slate-300 mb-2">
+                      <Settings2 className="w-4 h-4 mr-2" />
+                      <span className="text-sm font-semibold">PDF Settings</span>
+                    </div>
+                    
+                    <div>
+                      <label className="text-xs text-slate-500 uppercase font-semibold tracking-wider mb-2 block">Page Margins</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {(['none', 'small', 'big'] as const).map((m) => (
+                          <button
+                            key={m}
+                            onClick={() => { setPdfOptions(p => ({...p, margin: m})); setPdfBlob(null); }}
+                            className={`px-2 py-2 text-xs rounded border transition-colors capitalize
+                              ${pdfOptions.margin === m 
+                                ? 'bg-brand-900/50 border-brand-500 text-brand-200' 
+                                : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-600'}
+                            `}
+                          >
+                            {m}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-slate-500 uppercase font-semibold tracking-wider mb-2 block">Orientation</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {(['portrait', 'landscape'] as const).map((o) => (
+                          <button
+                            key={o}
+                            onClick={() => { setPdfOptions(p => ({...p, orientation: o})); setPdfBlob(null); }}
+                            className={`px-2 py-2 text-xs rounded border transition-colors capitalize
+                              ${pdfOptions.orientation === o 
+                                ? 'bg-brand-900/50 border-brand-500 text-brand-200' 
+                                : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-600'}
+                            `}
+                          >
+                            {o}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Stats */}
                 <div className="space-y-4 mb-8">
                   <div className="flex justify-between items-center text-sm">
                     <span className="text-slate-400">Total Files</span>
                     <span className="font-mono text-white">{stats.total}</span>
                   </div>
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-slate-400">Converted</span>
-                    <span className="font-mono text-green-400">{stats.completed}</span>
-                  </div>
-                   {stats.failed > 0 && (
+                  {mode === AppMode.JPEG && (
                     <div className="flex justify-between items-center text-sm">
-                      <span className="text-slate-400">Failed</span>
-                      <span className="font-mono text-red-400">{stats.failed}</span>
+                      <span className="text-slate-400">Converted</span>
+                      <span className="font-mono text-green-400">{stats.completed}</span>
+                    </div>
+                  )}
+                  {mode === AppMode.PDF && (
+                    <div className="flex justify-between items-center text-sm">
+                      <span className="text-slate-400">Status</span>
+                      <span className={`font-mono ${pdfBlob ? 'text-green-400' : 'text-slate-500'}`}>
+                        {pdfBlob ? 'Ready' : isProcessing ? 'Generating...' : 'Pending'}
+                      </span>
                     </div>
                   )}
                   
@@ -191,7 +323,8 @@ const App: React.FC = () => {
 
                 {/* Buttons */}
                 <div className="space-y-3">
-                  {stats.completed < stats.total && (
+                  {/* Conversion Button */}
+                  {(!pdfBlob || mode === AppMode.JPEG) && stats.completed < stats.total && (
                     <button
                       onClick={startConversion}
                       disabled={isProcessing}
@@ -204,30 +337,31 @@ const App: React.FC = () => {
                       {isProcessing ? (
                         <>
                           <RefreshCw className="w-5 h-5 mr-2 animate-spin" />
-                          Converting...
+                          {mode === AppMode.PDF ? 'Generating PDF...' : 'Converting...'}
                         </>
                       ) : (
                         <>
-                          <RefreshCw className="w-5 h-5 mr-2" />
-                          Convert All
+                          {mode === AppMode.PDF ? <FileText className="w-5 h-5 mr-2" /> : <RefreshCw className="w-5 h-5 mr-2" />}
+                          {mode === AppMode.PDF ? 'Generate PDF' : 'Convert All'}
                         </>
                       )}
                     </button>
                   )}
 
-                  {stats.completed > 0 && (
+                  {/* Download Button */}
+                  {((mode === AppMode.JPEG && stats.completed > 0) || (mode === AppMode.PDF && pdfBlob)) && (
                     <button
-                      onClick={handleDownloadZip}
+                      onClick={handleDownload}
                       className="w-full flex items-center justify-center py-3 px-4 rounded-lg font-bold text-slate-900 bg-white hover:bg-slate-100 transition-all shadow-lg active:transform active:scale-95"
                     >
                       <Download className="w-5 h-5 mr-2" />
-                      Download ZIP
+                      {mode === AppMode.JPEG ? 'Download ZIP' : 'Download PDF'}
                     </button>
                   )}
                 </div>
                 
                 <p className="mt-6 text-xs text-center text-slate-500">
-                  Tip: Processing happens entirely on your device. Large batches may take a moment.
+                  Tip: Processing happens entirely on your device.
                 </p>
               </div>
             </div>
@@ -236,7 +370,7 @@ const App: React.FC = () => {
       </main>
 
       <footer className="mt-16 text-slate-600 text-sm">
-        WebP to JPEG Converter • Privacy First
+        WebP to JPEG & PDF Converter • Privacy First
       </footer>
     </div>
   );

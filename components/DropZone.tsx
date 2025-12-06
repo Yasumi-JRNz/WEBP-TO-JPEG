@@ -4,10 +4,25 @@ import { Upload, FileImage, Plus } from 'lucide-react';
 interface DropZoneProps {
   onFilesAdded: (files: File[]) => void;
   compact?: boolean;
+  title?: string;
+  accept?: string;
 }
 
-const DropZone: React.FC<DropZoneProps> = ({ onFilesAdded, compact = false }) => {
+const DropZone: React.FC<DropZoneProps> = ({ 
+  onFilesAdded, 
+  compact = false, 
+  title, 
+  accept = 'image/webp' 
+}) => {
   const [isDragging, setIsDragging] = useState(false);
+
+  const validateFile = useCallback((file: File) => {
+    if (accept === 'image/*') {
+      return file.type.startsWith('image/');
+    }
+    const acceptedTypes = accept.split(',').map(t => t.trim());
+    return acceptedTypes.includes(file.type);
+  }, [accept]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -27,27 +42,27 @@ const DropZone: React.FC<DropZoneProps> = ({ onFilesAdded, compact = false }) =>
     setIsDragging(false);
 
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      // Cast to File[] to ensure TypeScript correctly infers the type of the array elements
-      const validFiles = (Array.from(e.dataTransfer.files) as File[]).filter(
-        (file) => file.type === 'image/webp'
-      );
+      const validFiles = (Array.from(e.dataTransfer.files) as File[]).filter(validateFile);
+      
       if (validFiles.length > 0) {
         onFilesAdded(validFiles);
       } else {
-        alert('Please drop WebP images only.');
+        if (e.dataTransfer.files.length > 0) {
+           const msg = accept === 'image/webp' ? 'Please drop WebP images only.' : 'Please drop image files only.';
+           alert(msg);
+        }
       }
     }
-  }, [onFilesAdded]);
+  }, [onFilesAdded, validateFile, accept]);
 
   const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      // Cast to File[] to ensure TypeScript correctly infers the type of the array elements
-      const validFiles = (Array.from(e.target.files) as File[]).filter(
-        (file) => file.type === 'image/webp'
-      );
-      onFilesAdded(validFiles);
+      const validFiles = (Array.from(e.target.files) as File[]).filter(validateFile);
+      if (validFiles.length > 0) {
+        onFilesAdded(validFiles);
+      }
     }
-  }, [onFilesAdded]);
+  }, [onFilesAdded, validateFile]);
 
   if (compact) {
     return (
@@ -64,7 +79,7 @@ const DropZone: React.FC<DropZoneProps> = ({ onFilesAdded, compact = false }) =>
         <input
           type="file"
           multiple
-          accept="image/webp"
+          accept={accept}
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
           onChange={handleFileInput}
         />
@@ -91,7 +106,7 @@ const DropZone: React.FC<DropZoneProps> = ({ onFilesAdded, compact = false }) =>
       <input
         type="file"
         multiple
-        accept="image/webp"
+        accept={accept}
         className="absolute inset-0 w-full h-full opacity-0 z-10 cursor-pointer"
         onChange={handleFileInput}
       />
@@ -101,7 +116,7 @@ const DropZone: React.FC<DropZoneProps> = ({ onFilesAdded, compact = false }) =>
           <Upload className="w-8 h-8" />
         </div>
         <p className="mb-2 text-xl font-semibold text-slate-200">
-          Drop WebP files here
+          {title || "Drop WebP files here"}
         </p>
         <p className="text-sm text-slate-400">
           or click to browse from your device

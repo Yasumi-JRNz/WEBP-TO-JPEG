@@ -19,3 +19,16 @@ export interface ProcessingStats {
   completed: number;
   failed: number;
 }
+
+export enum AppMode {
+  JPEG = 'JPEG',
+  PDF = 'PDF',
+}
+
+export type PdfMargin = 'none' | 'small' | 'big';
+export type PdfOrientation = 'portrait' | 'landscape';
+
+export interface PdfOptions {
+  margin: PdfMargin;
+  orientation: PdfOrientation;
+}
